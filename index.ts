@@ -13,8 +13,35 @@ type ProviderModelConfig = {
 	maxTokens: number;
 };
 
+type RawBifrostModel = {
+	id?: unknown;
+	name?: unknown;
+	normalized_name?: unknown;
+	context_length?: unknown;
+	contextWindow?: unknown;
+	max_context_length?: unknown;
+	max_input_tokens?: unknown;
+	max_tokens?: unknown;
+	max_output_tokens?: unknown;
+	max_completion_tokens?: unknown;
+	architecture?: {
+		modality?: unknown;
+		input_modalities?: unknown;
+	};
+	pricing?: {
+		prompt?: unknown;
+		completion?: unknown;
+		input?: unknown;
+		output?: unknown;
+		cache_read?: unknown;
+		cache_write?: unknown;
+		cache_read_input_token?: unknown;
+		cache_creation_input_token?: unknown;
+	};
+};
+
 type OpenAIModelsResponse = {
-	data?: Array<{ id?: unknown; name?: unknown }>;
+	data?: RawBifrostModel[];
 };
 
 type StoredBifrostAuth = {
@@ -46,6 +73,15 @@ type BifrostConfig = {
 	maxTokens: string;
 };
 
+type DiscoveredModel = {
+	id: string;
+	name?: string;
+	contextWindow?: number;
+	maxTokens?: number;
+	input?: ("text" | "image")[];
+	cost?: ProviderModelConfig["cost"];
+};
+
 const PROVIDER_ID = "bifrost";
 const DEFAULT_BASE_URL = "http://localhost:8080/openai/v1";
 const DEFAULT_CONTEXT_WINDOW = 128_000;
@@ -67,6 +103,28 @@ function parsePositiveInteger(value: string | undefined, fallback: number): numb
 	if (!value) return fallback;
 	const parsed = Number(value);
 	return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function numberValue(value: unknown): number | undefined {
+	const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function integerValue(...values: unknown[]): number | undefined {
+	for (const value of values) {
+		const parsed = numberValue(value);
+		if (parsed) return Math.floor(parsed);
+	}
+	return undefined;
+}
+
+function pricePerMillion(value: unknown): number | undefined {
+	const parsed = numberValue(value);
+	if (parsed === undefined) return undefined;
+	// Bifrost's catalog is OpenRouter-like in many deployments, where pricing is
+	// usually dollars/token. Pi stores dollars/million tokens. If a gateway ever
+	// returns already-per-million rates, values >= 1 are left alone.
+	return parsed < 1 ? parsed * 1_000_000 : parsed;
 }
 
 function stringValue(value: unknown): string | undefined {
@@ -142,30 +200,59 @@ function modelSupportsImage(id: string): boolean {
 	return /(?:claude|gemini|gpt-4o|gpt-5|vision|llava)/iu.test(id);
 }
 
+function discoveredInput(raw: RawBifrostModel, id: string): ("text" | "image")[] {
+	const modalities = Array.isArray(raw.architecture?.input_modalities)
+		? raw.architecture.input_modalities.map(String)
+		: [];
+	const modality = stringValue(raw.architecture?.modality) ?? "";
+	return modalities.some((entry) => entry.toLowerCase() === "image") || /image/i.test(modality) || modelSupportsImage(id)
+		? ["text", "image"]
+		: ["text"];
+}
+
+function discoveredCost(raw: RawBifrostModel): ProviderModelConfig["cost"] | undefined {
+	const pricing = raw.pricing;
+	if (!pricing) return undefined;
+	return {
+		input: pricePerMillion(pricing.prompt ?? pricing.input) ?? 0,
+		output: pricePerMillion(pricing.completion ?? pricing.output) ?? 0,
+		cacheRead: pricePerMillion(pricing.cache_read ?? pricing.cache_read_input_token) ?? 0,
+		cacheWrite: pricePerMillion(pricing.cache_write ?? pricing.cache_creation_input_token) ?? 0,
+	};
+}
+
+function fromBifrostModel(raw: RawBifrostModel): DiscoveredModel | undefined {
+	const id = stringValue(raw.id)?.trim();
+	if (!id) return undefined;
+	return {
+		id,
+		name: stringValue(raw.name) ?? stringValue(raw.normalized_name) ?? id,
+		contextWindow: integerValue(raw.context_length, raw.contextWindow, raw.max_context_length, raw.max_input_tokens),
+		maxTokens: integerValue(raw.max_output_tokens, raw.max_completion_tokens, raw.max_tokens),
+		input: discoveredInput(raw, id),
+		cost: discoveredCost(raw),
+	};
+}
+
 function configuredReasoningModels(config: BifrostConfig): Set<string> {
 	return new Set(parseList(config.reasoningModels));
 }
 
-function toModelConfig(
-	id: string,
-	name: string | undefined,
-	reasoningModels: Set<string>,
-	config: BifrostConfig,
-): ProviderModelConfig {
-	const contextWindow = parsePositiveInteger(config.contextWindow, DEFAULT_CONTEXT_WINDOW);
-	const maxTokens = parsePositiveInteger(config.maxTokens, DEFAULT_MAX_TOKENS);
+function toModelConfig(model: DiscoveredModel, reasoningModels: Set<string>, config: BifrostConfig): ProviderModelConfig {
+	const contextWindow = model.contextWindow ?? parsePositiveInteger(config.contextWindow, DEFAULT_CONTEXT_WINDOW);
+	const maxTokens = model.maxTokens ?? parsePositiveInteger(config.maxTokens, DEFAULT_MAX_TOKENS);
 	return {
-		id,
-		name: name || id,
-		reasoning: reasoningModels.has(id),
-		input: modelSupportsImage(id) ? ["text", "image"] : ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		id: model.id,
+		name: model.name || model.id,
+		reasoning: reasoningModels.has(model.id),
+		input: model.input ?? (modelSupportsImage(model.id) ? ["text", "image"] : ["text"]),
+		cost: model.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow,
 		maxTokens,
 	};
 }
 
-async function discoverModels(config: BifrostConfig): Promise<Array<{ id: string; name?: string }>> {
+async function discoverModels(config: BifrostConfig): Promise<DiscoveredModel[]> {
 	const headers: Record<string, string> = { Authorization: `Bearer ${config.apiKey}` };
 	if (config.virtualKey) headers["x-bf-vk"] = config.virtualKey;
 
@@ -175,12 +262,12 @@ async function discoverModels(config: BifrostConfig): Promise<Array<{ id: string
 
 	const payload = (await response.json()) as OpenAIModelsResponse;
 	return (payload.data ?? []).flatMap((model) => {
-		if (typeof model.id !== "string" || model.id.length === 0) return [];
-		return [{ id: model.id, name: typeof model.name === "string" ? model.name : undefined }];
+		const parsed = fromBifrostModel(model);
+		return parsed ? [parsed] : [];
 	});
 }
 
-async function loadModelIds(config: BifrostConfig): Promise<Array<{ id: string; name?: string }>> {
+async function loadModels(config: BifrostConfig): Promise<DiscoveredModel[]> {
 	const configured = parseList(config.models);
 	if (configured.length > 0) return configured.map((id) => ({ id }));
 
@@ -199,9 +286,9 @@ async function loadModelIds(config: BifrostConfig): Promise<Array<{ id: string; 
 
 export default async function bifrostProvider(pi: ExtensionAPI) {
 	const config = await loadConfig();
-	const modelIds = await loadModelIds(config);
+	const discoveredModels = await loadModels(config);
 	const reasoningModels = configuredReasoningModels(config);
-	const models = modelIds.map((model) => toModelConfig(model.id, model.name, reasoningModels, config));
+	const models = discoveredModels.map((model) => toModelConfig(model, reasoningModels, config));
 
 	pi.registerProvider(PROVIDER_ID, {
 		name: "Bifrost",

@@ -42,11 +42,9 @@ Example:
     "key": "dummy-key",
     "base_url": "http://localhost:8080/openai/v1",
     "virtual_key": "",
-    "models": "openai/gpt-4o-mini,anthropic/claude-sonnet-4-20250514",
+    "models": "",
     "discover_models": "1",
-    "reasoning_models": "",
-    "context_window": "128000",
-    "max_tokens": "16384"
+    "reasoning_models": ""
   }
 }
 ```
@@ -61,10 +59,23 @@ Environment variables are still supported as overrides, matching the LiteLLM ext
 | `models` | `BIFROST_MODELS` | unset | Comma-separated model IDs. When unset, the extension tries `/models`, then falls back to a small default catalog. |
 | `discover_models` / `discoverModels` | `BIFROST_DISCOVER_MODELS` | `1` | Set to `0` to skip `/models` discovery. |
 | `reasoning_models` / `reasoningModels` | `BIFROST_REASONING_MODELS` | unset | Comma-separated model IDs that should expose pi thinking levels. Defaults to none for gateway compatibility. |
-| `context_window` / `contextWindow` | `BIFROST_CONTEXT_WINDOW` | `128000` | Context window assigned to discovered/configured models. |
-| `max_tokens` / `maxTokens` | `BIFROST_MAX_TOKENS` | `16384` | Max output tokens assigned to discovered/configured models. |
+| `context_window` / `contextWindow` | `BIFROST_CONTEXT_WINDOW` | `128000` | Fallback only. Used when discovery does not return per-model context metadata. |
+| `max_tokens` / `maxTokens` | `BIFROST_MAX_TOKENS` | `16384` | Fallback only. Used when discovery does not return per-model output-token metadata. |
 
 For compatibility with pi's newer API-key credential shape, the extension also accepts these values under `bifrost.env` using the `BIFROST_*` names.
+
+## Model metadata
+
+When `discover_models` is enabled and Bifrost's `/models` endpoint returns catalog metadata, the extension maps it per model:
+
+- `context_length`, `contextWindow`, `max_context_length`, or `max_input_tokens` → pi `contextWindow`
+- `max_output_tokens`, `max_completion_tokens`, or `max_tokens` → pi `maxTokens`
+- `architecture.input_modalities` / `architecture.modality` → pi text/image support
+- `pricing.prompt` / `pricing.completion` and cache pricing fields → pi cost metadata
+
+The global `context_window` and `max_tokens` settings are therefore fallbacks, not the preferred source of truth.
+
+If you set `models` explicitly, Bifrost is not queried for metadata for those entries, so the fallback values apply.
 
 ## Bifrost endpoint note
 
