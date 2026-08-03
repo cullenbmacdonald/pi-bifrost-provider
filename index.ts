@@ -1,3 +1,6 @@
+import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 type ProviderModelConfig = {
@@ -12,6 +15,35 @@ type ProviderModelConfig = {
 
 type OpenAIModelsResponse = {
 	data?: Array<{ id?: unknown; name?: unknown }>;
+};
+
+type StoredBifrostAuth = {
+	key?: unknown;
+	base_url?: unknown;
+	baseUrl?: unknown;
+	virtual_key?: unknown;
+	virtualKey?: unknown;
+	models?: unknown;
+	discover_models?: unknown;
+	discoverModels?: unknown;
+	reasoning_models?: unknown;
+	reasoningModels?: unknown;
+	context_window?: unknown;
+	contextWindow?: unknown;
+	max_tokens?: unknown;
+	maxTokens?: unknown;
+	env?: Record<string, unknown>;
+};
+
+type BifrostConfig = {
+	baseUrl: string;
+	apiKey: string;
+	virtualKey?: string;
+	models?: string;
+	discoverModels: string;
+	reasoningModels?: string;
+	contextWindow: string;
+	maxTokens: string;
 };
 
 const PROVIDER_ID = "bifrost";
@@ -37,6 +69,16 @@ function parsePositiveInteger(value: string | undefined, fallback: number): numb
 	return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }
 
+function stringValue(value: unknown): string | undefined {
+	return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function resolveStoredValue(value: string | undefined): string | undefined {
+	if (!value) return undefined;
+	const match = value.match(/^\$\{?([A-Z0-9_]+)\}?$/u);
+	return match ? process.env[match[1]] : value;
+}
+
 function normalizeBaseUrl(value: string | undefined): string {
 	let baseUrl = (value || DEFAULT_BASE_URL).trim().replace(/\/+$/u, "");
 	// Bifrost docs often show http://localhost:8080/openai for OpenAI SDKs.
@@ -46,9 +88,53 @@ function normalizeBaseUrl(value: string | undefined): string {
 	return baseUrl;
 }
 
-function configuredHeaders(): Record<string, string> | undefined {
+async function readAuthFromFile(): Promise<StoredBifrostAuth> {
+	const agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+	try {
+		const auth = JSON.parse(await readFile(join(agentDir, "auth.json"), "utf8")) as Record<string, StoredBifrostAuth>;
+		return auth[PROVIDER_ID] ?? {};
+	} catch {
+		return {};
+	}
+}
+
+function authValue(auth: StoredBifrostAuth, envName: string, ...authKeys: Array<keyof StoredBifrostAuth>): string | undefined {
+	// Match the LiteLLM extension style: real environment variables win, then
+	// values from ~/.pi/agent/auth.json. Also accept ApiKeyCredential-style env.
+	const fromProcess = process.env[envName];
+	if (fromProcess?.trim()) return fromProcess.trim();
+
+	const env = auth.env ?? {};
+	const fromCredentialEnv = stringValue(env[envName]);
+	if (fromCredentialEnv?.trim()) return fromCredentialEnv.trim();
+
+	for (const key of authKeys) {
+		const value = stringValue(auth[key]);
+		if (value?.trim()) return value.trim();
+	}
+	return undefined;
+}
+
+async function loadConfig(): Promise<BifrostConfig> {
+	const auth = await readAuthFromFile();
+	const apiKey = resolveStoredValue(authValue(auth, "BIFROST_API_KEY", "key")) ?? "dummy-key";
+
+	return {
+		baseUrl: normalizeBaseUrl(authValue(auth, "BIFROST_BASE_URL", "base_url", "baseUrl")),
+		apiKey,
+		virtualKey: authValue(auth, "BIFROST_VIRTUAL_KEY", "virtual_key", "virtualKey"),
+		models: authValue(auth, "BIFROST_MODELS", "models"),
+		discoverModels: authValue(auth, "BIFROST_DISCOVER_MODELS", "discover_models", "discoverModels") ?? "1",
+		reasoningModels: authValue(auth, "BIFROST_REASONING_MODELS", "reasoning_models", "reasoningModels"),
+		contextWindow:
+			authValue(auth, "BIFROST_CONTEXT_WINDOW", "context_window", "contextWindow") ?? String(DEFAULT_CONTEXT_WINDOW),
+		maxTokens: authValue(auth, "BIFROST_MAX_TOKENS", "max_tokens", "maxTokens") ?? String(DEFAULT_MAX_TOKENS),
+	};
+}
+
+function configuredHeaders(config: BifrostConfig): Record<string, string> | undefined {
 	const headers: Record<string, string> = {};
-	if (process.env.BIFROST_VIRTUAL_KEY) headers["x-bf-vk"] = "$BIFROST_VIRTUAL_KEY";
+	if (config.virtualKey) headers["x-bf-vk"] = config.virtualKey;
 	return Object.keys(headers).length > 0 ? headers : undefined;
 }
 
@@ -56,13 +142,18 @@ function modelSupportsImage(id: string): boolean {
 	return /(?:claude|gemini|gpt-4o|gpt-5|vision|llava)/iu.test(id);
 }
 
-function configuredReasoningModels(): Set<string> {
-	return new Set(parseList(process.env.BIFROST_REASONING_MODELS));
+function configuredReasoningModels(config: BifrostConfig): Set<string> {
+	return new Set(parseList(config.reasoningModels));
 }
 
-function toModelConfig(id: string, name: string | undefined, reasoningModels: Set<string>): ProviderModelConfig {
-	const contextWindow = parsePositiveInteger(process.env.BIFROST_CONTEXT_WINDOW, DEFAULT_CONTEXT_WINDOW);
-	const maxTokens = parsePositiveInteger(process.env.BIFROST_MAX_TOKENS, DEFAULT_MAX_TOKENS);
+function toModelConfig(
+	id: string,
+	name: string | undefined,
+	reasoningModels: Set<string>,
+	config: BifrostConfig,
+): ProviderModelConfig {
+	const contextWindow = parsePositiveInteger(config.contextWindow, DEFAULT_CONTEXT_WINDOW);
+	const maxTokens = parsePositiveInteger(config.maxTokens, DEFAULT_MAX_TOKENS);
 	return {
 		id,
 		name: name || id,
@@ -74,13 +165,12 @@ function toModelConfig(id: string, name: string | undefined, reasoningModels: Se
 	};
 }
 
-async function discoverModels(baseUrl: string): Promise<Array<{ id: string; name?: string }>> {
-	const apiKey = process.env.BIFROST_API_KEY || "dummy-key";
-	const headers: Record<string, string> = { Authorization: `Bearer ${apiKey}` };
-	if (process.env.BIFROST_VIRTUAL_KEY) headers["x-bf-vk"] = process.env.BIFROST_VIRTUAL_KEY;
+async function discoverModels(config: BifrostConfig): Promise<Array<{ id: string; name?: string }>> {
+	const headers: Record<string, string> = { Authorization: `Bearer ${config.apiKey}` };
+	if (config.virtualKey) headers["x-bf-vk"] = config.virtualKey;
 
 	const signal = AbortSignal.timeout(2_000);
-	const response = await fetch(`${baseUrl}/models`, { headers, signal });
+	const response = await fetch(`${config.baseUrl}/models`, { headers, signal });
 	if (!response.ok) throw new Error(`Bifrost model discovery failed: HTTP ${response.status}`);
 
 	const payload = (await response.json()) as OpenAIModelsResponse;
@@ -90,13 +180,13 @@ async function discoverModels(baseUrl: string): Promise<Array<{ id: string; name
 	});
 }
 
-async function loadModelIds(baseUrl: string): Promise<Array<{ id: string; name?: string }>> {
-	const configured = parseList(process.env.BIFROST_MODELS);
+async function loadModelIds(config: BifrostConfig): Promise<Array<{ id: string; name?: string }>> {
+	const configured = parseList(config.models);
 	if (configured.length > 0) return configured.map((id) => ({ id }));
 
-	if (process.env.BIFROST_DISCOVER_MODELS !== "0") {
+	if (config.discoverModels !== "0") {
 		try {
-			const discovered = await discoverModels(baseUrl);
+			const discovered = await discoverModels(config);
 			if (discovered.length > 0) return discovered;
 		} catch {
 			// Fall back to a small useful catalog. Startup should not fail just because
@@ -108,17 +198,17 @@ async function loadModelIds(baseUrl: string): Promise<Array<{ id: string; name?:
 }
 
 export default async function bifrostProvider(pi: ExtensionAPI) {
-	const baseUrl = normalizeBaseUrl(process.env.BIFROST_BASE_URL);
-	const modelIds = await loadModelIds(baseUrl);
-	const reasoningModels = configuredReasoningModels();
-	const models = modelIds.map((model) => toModelConfig(model.id, model.name, reasoningModels));
+	const config = await loadConfig();
+	const modelIds = await loadModelIds(config);
+	const reasoningModels = configuredReasoningModels(config);
+	const models = modelIds.map((model) => toModelConfig(model.id, model.name, reasoningModels, config));
 
 	pi.registerProvider(PROVIDER_ID, {
 		name: "Bifrost",
-		baseUrl,
-		apiKey: process.env.BIFROST_API_KEY ? "$BIFROST_API_KEY" : "dummy-key",
+		baseUrl: config.baseUrl,
+		apiKey: config.apiKey,
 		api: "openai-completions",
-		headers: configuredHeaders(),
+		headers: configuredHeaders(config),
 		compat: {
 			// Bifrost is an OpenAI-compatible gateway. Using system instead of developer
 			// is the safest default across routed upstream providers.
@@ -130,7 +220,10 @@ export default async function bifrostProvider(pi: ExtensionAPI) {
 	pi.registerCommand("bifrost", {
 		description: "Show Bifrost provider configuration",
 		handler: async (_args, ctx) => {
-			ctx.ui.notify(`Bifrost provider: ${baseUrl} (${models.length} model${models.length === 1 ? "" : "s"})`, "info");
+			ctx.ui.notify(
+				`Bifrost provider: ${config.baseUrl} (${models.length} model${models.length === 1 ? "" : "s"})`,
+				"info",
+			);
 		},
 	});
 }

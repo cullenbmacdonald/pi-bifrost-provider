@@ -28,29 +28,43 @@ pi --model bifrost/openai/gpt-4o-mini
 
 ## Configuration
 
-Environment variables:
+This extension follows the same pattern as our LiteLLM provider: it reads provider configuration directly from pi's credential store:
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `BIFROST_BASE_URL` | `http://localhost:8080/openai/v1` | Bifrost OpenAI-compatible base URL. If set to `.../openai`, the extension normalizes it to `.../openai/v1`. |
-| `BIFROST_API_KEY` | `dummy-key` | Bearer token sent to Bifrost. Use a real key if your Bifrost deployment requires one. |
-| `BIFROST_VIRTUAL_KEY` | unset | Sends Bifrost virtual key as `x-bf-vk`. |
-| `BIFROST_MODELS` | unset | Comma-separated model IDs. When unset, the extension tries `/models`, then falls back to a small default catalog. |
-| `BIFROST_DISCOVER_MODELS` | `1` | Set to `0` to skip `/models` discovery. |
-| `BIFROST_REASONING_MODELS` | unset | Comma-separated model IDs that should expose pi thinking levels. Defaults to none for gateway compatibility. |
-| `BIFROST_CONTEXT_WINDOW` | `128000` | Context window assigned to discovered/configured models. |
-| `BIFROST_MAX_TOKENS` | `16384` | Max output tokens assigned to discovered/configured models. |
-
-Example with explicit models and a virtual key:
-
-```bash
-export BIFROST_BASE_URL=http://localhost:8080/openai/v1
-export BIFROST_API_KEY=dummy-key
-export BIFROST_VIRTUAL_KEY=vk_12345
-export BIFROST_MODELS=openai/gpt-4o-mini,anthropic/claude-sonnet-4-20250514
-
-pi -e ~/dev/pi-dev/pi-bifrost-provider --model bifrost/openai/gpt-4o-mini
+```text
+~/.pi/agent/auth.json
 ```
+
+Example:
+
+```json
+{
+  "bifrost": {
+    "key": "dummy-key",
+    "base_url": "http://localhost:8080/openai/v1",
+    "virtual_key": "",
+    "models": "openai/gpt-4o-mini,anthropic/claude-sonnet-4-20250514",
+    "discover_models": "1",
+    "reasoning_models": "",
+    "context_window": "128000",
+    "max_tokens": "16384"
+  }
+}
+```
+
+Environment variables are still supported as overrides, matching the LiteLLM extension style.
+
+| auth.json key | env override | Default | Description |
+| --- | --- | --- | --- |
+| `key` | `BIFROST_API_KEY` | `dummy-key` | Bearer token sent to Bifrost. Use `dummy-key` when Bifrost handles upstream provider credentials internally. |
+| `base_url` / `baseUrl` | `BIFROST_BASE_URL` | `http://localhost:8080/openai/v1` | Bifrost OpenAI-compatible base URL. If set to `.../openai`, the extension normalizes it to `.../openai/v1`. |
+| `virtual_key` / `virtualKey` | `BIFROST_VIRTUAL_KEY` | unset | Sends Bifrost virtual key as `x-bf-vk`. |
+| `models` | `BIFROST_MODELS` | unset | Comma-separated model IDs. When unset, the extension tries `/models`, then falls back to a small default catalog. |
+| `discover_models` / `discoverModels` | `BIFROST_DISCOVER_MODELS` | `1` | Set to `0` to skip `/models` discovery. |
+| `reasoning_models` / `reasoningModels` | `BIFROST_REASONING_MODELS` | unset | Comma-separated model IDs that should expose pi thinking levels. Defaults to none for gateway compatibility. |
+| `context_window` / `contextWindow` | `BIFROST_CONTEXT_WINDOW` | `128000` | Context window assigned to discovered/configured models. |
+| `max_tokens` / `maxTokens` | `BIFROST_MAX_TOKENS` | `16384` | Max output tokens assigned to discovered/configured models. |
+
+For compatibility with pi's newer API-key credential shape, the extension also accepts these values under `bifrost.env` using the `BIFROST_*` names.
 
 ## Bifrost endpoint note
 
@@ -66,7 +80,7 @@ Pi's OpenAI-compatible transport expects a base URL before `/chat/completions`, 
 http://localhost:8080/openai/v1
 ```
 
-If you provide `BIFROST_BASE_URL=http://localhost:8080/openai`, the extension automatically appends `/v1`.
+If you provide `BIFROST_BASE_URL=http://localhost:8080/openai` or `base_url: "http://localhost:8080/openai"`, the extension automatically appends `/v1`.
 
 ## Commands
 
