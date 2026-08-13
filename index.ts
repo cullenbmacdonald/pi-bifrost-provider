@@ -11,6 +11,7 @@ type ProviderModelConfig = {
 	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 	contextWindow: number;
 	maxTokens: number;
+	_api?: "openai-responses" | "openai-completions";
 };
 
 type RawBifrostModel = {
@@ -91,6 +92,16 @@ const DEFAULT_MODEL_IDS = [
 	"openai/gpt-4o",
 	"anthropic/claude-sonnet-4-20250514",
 ];
+
+/** Models that should use the OpenAI Responses API (tools + reasoning compatible). */
+function prefersResponsesApi(id: string): boolean {
+	return /(\bgpt-5(?:[.-]|$)|codex)/i.test(id);
+}
+
+/** Infer whether a model supports reasoning/thinking from its ID. */
+function inferReasoning(id: string): boolean {
+	return /(opus|sonnet|reason|r1|o[134]|gpt-5|qwen3|deepseek)/i.test(id);
+}
 
 function parseList(value: string | undefined): string[] {
 	return (value ?? "")
@@ -241,21 +252,52 @@ function configuredReasoningModels(config: BifrostConfig): Set<string> {
 function toModelConfig(model: DiscoveredModel, reasoningModels: Set<string>, config: BifrostConfig): ProviderModelConfig {
 	const contextWindow = model.contextWindow ?? parsePositiveInteger(config.contextWindow, DEFAULT_CONTEXT_WINDOW);
 	const maxTokens = model.maxTokens ?? parsePositiveInteger(config.maxTokens, DEFAULT_MAX_TOKENS);
+	const reasoning = reasoningModels.has(model.id) || inferReasoning(model.id);
 	return {
 		id: model.id,
 		name: model.name || model.id,
-		reasoning: reasoningModels.has(model.id),
+		reasoning,
 		input: model.input ?? (modelSupportsImage(model.id) ? ["text", "image"] : ["text"]),
 		cost: model.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow,
 		maxTokens,
+		_api: prefersResponsesApi(model.id) ? "openai-responses" : "openai-completions",
 	};
+}
+
+async function discoverModelsForProvider(
+	config: BifrostConfig,
+	provider: string,
+): Promise<DiscoveredModel[]> {
+	const baseUrl = config.baseUrl.replace(/\/openai\/v1$/, "").replace(/\/v1$/, "");
+	const headers: Record<string, string> = { Authorization: `Bearer ${config.apiKey}` };
+	if (config.virtualKey) headers["x-bf-vk"] = config.virtualKey;
+
+	const signal = AbortSignal.timeout(5_000);
+	const response = await fetch(`${baseUrl}/v1/models?provider=${provider}`, { headers, signal });
+	if (!response.ok) return [];
+
+	const payload = (await response.json()) as OpenAIModelsResponse;
+	return (payload.data ?? []).flatMap((model) => {
+		const parsed = fromBifrostModel(model);
+		return parsed ? [parsed] : [];
+	});
 }
 
 async function discoverModels(config: BifrostConfig): Promise<DiscoveredModel[]> {
 	const headers: Record<string, string> = { Authorization: `Bearer ${config.apiKey}` };
 	if (config.virtualKey) headers["x-bf-vk"] = config.virtualKey;
 
+	// First try per-provider discovery which returns richer metadata (pricing, context, etc.)
+	const baseUrl = config.baseUrl.replace(/\/openai\/v1$/, "").replace(/\/v1$/, "");
+	const providers = ["openai", "bedrock", "anthropic", "google", "azure-openai"];
+	const perProviderResults = await Promise.all(
+		providers.map((p) => discoverModelsForProvider(config, p).catch(() => [] as DiscoveredModel[])),
+	);
+	const richModels = perProviderResults.flat();
+	if (richModels.length > 0) return richModels;
+
+	// Fallback: try the basic /models endpoint
 	const signal = AbortSignal.timeout(2_000);
 	const response = await fetch(`${config.baseUrl}/models`, { headers, signal });
 	if (!response.ok) throw new Error(`Bifrost model discovery failed: HTTP ${response.status}`);
@@ -284,31 +326,56 @@ async function loadModels(config: BifrostConfig): Promise<DiscoveredModel[]> {
 	return DEFAULT_MODEL_IDS.map((id) => ({ id }));
 }
 
+function stripInternalFields(models: ProviderModelConfig[]): Array<Omit<ProviderModelConfig, "_api">> {
+	return models.map(({ _api: _, ...rest }) => rest);
+}
+
 export default async function bifrostProvider(pi: ExtensionAPI) {
 	const config = await loadConfig();
 	const discoveredModels = await loadModels(config);
 	const reasoningModels = configuredReasoningModels(config);
-	const models = discoveredModels.map((model) => toModelConfig(model, reasoningModels, config));
+	const allModels = discoveredModels.map((model) => toModelConfig(model, reasoningModels, config));
 
-	pi.registerProvider(PROVIDER_ID, {
-		name: "Bifrost",
-		baseUrl: config.baseUrl,
-		apiKey: config.apiKey,
-		api: "openai-completions",
-		headers: configuredHeaders(config),
-		compat: {
-			// Bifrost is an OpenAI-compatible gateway. Using system instead of developer
-			// is the safest default across routed upstream providers.
-			supportsDeveloperRole: false,
-		},
-		models,
-	});
+	// Split models by API type: GPT-5.x uses Responses API (supports tools + reasoning),
+	// everything else uses Chat Completions.
+	const responsesModels = allModels.filter((m) => m._api === "openai-responses");
+	const completionsModels = allModels.filter((m) => m._api !== "openai-responses");
+
+	// Bifrost's base URL for OpenAI-compat is .../openai/v1. The Responses API
+	// lives at .../v1/responses, so we need the base without /openai/v1.
+	const responsesBaseUrl = config.baseUrl.replace(/\/openai\/v1$/, "/v1");
+
+	if (completionsModels.length > 0) {
+		pi.registerProvider(PROVIDER_ID, {
+			name: "Bifrost",
+			baseUrl: config.baseUrl,
+			apiKey: config.apiKey,
+			api: "openai-completions",
+			headers: configuredHeaders(config),
+			compat: {
+				supportsDeveloperRole: false,
+			},
+			models: stripInternalFields(completionsModels),
+		});
+	}
+
+	if (responsesModels.length > 0) {
+		pi.registerProvider(`${PROVIDER_ID}-responses`, {
+			name: "Bifrost (Responses)",
+			baseUrl: responsesBaseUrl,
+			apiKey: config.apiKey,
+			api: "openai-responses",
+			headers: configuredHeaders(config),
+			models: stripInternalFields(responsesModels),
+		});
+	}
 
 	pi.registerCommand("bifrost", {
 		description: "Show Bifrost provider configuration",
 		handler: async (_args, ctx) => {
+			const total = allModels.length;
 			ctx.ui.notify(
-				`Bifrost provider: ${config.baseUrl} (${models.length} model${models.length === 1 ? "" : "s"})`,
+				`Bifrost provider: ${config.baseUrl} (${total} model${total === 1 ? "" : "s"}: ${completionsModels.length} completions, ${responsesModels.length} responses)`,
 				"info",
 			);
 		},
