@@ -38,6 +38,8 @@ type RawBifrostModel = {
 		cache_write?: unknown;
 		cache_read_input_token?: unknown;
 		cache_creation_input_token?: unknown;
+		input_cache_read?: unknown;
+		input_cache_write?: unknown;
 	};
 };
 
@@ -227,8 +229,8 @@ function discoveredCost(raw: RawBifrostModel): ProviderModelConfig["cost"] | und
 	return {
 		input: pricePerMillion(pricing.prompt ?? pricing.input) ?? 0,
 		output: pricePerMillion(pricing.completion ?? pricing.output) ?? 0,
-		cacheRead: pricePerMillion(pricing.cache_read ?? pricing.cache_read_input_token) ?? 0,
-		cacheWrite: pricePerMillion(pricing.cache_write ?? pricing.cache_creation_input_token) ?? 0,
+		cacheRead: pricePerMillion(pricing.cache_read ?? pricing.cache_read_input_token ?? pricing.input_cache_read) ?? 0,
+		cacheWrite: pricePerMillion(pricing.cache_write ?? pricing.cache_creation_input_token ?? pricing.input_cache_write) ?? 0,
 	};
 }
 
