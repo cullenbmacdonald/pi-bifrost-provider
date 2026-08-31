@@ -10,6 +10,10 @@ type PiCompat = {
 	sendSessionIdHeader?: boolean;
 };
 
+type ThinkingLevelMap = {
+	xhigh?: "xhigh" | null;
+};
+
 type ProviderModelConfig = {
 	id: string;
 	name: string;
@@ -19,6 +23,7 @@ type ProviderModelConfig = {
 	contextWindow: number;
 	maxTokens: number;
 	compat?: PiCompat;
+	thinkingLevelMap?: ThinkingLevelMap;
 	_api?: "openai-responses" | "openai-completions";
 };
 
@@ -276,6 +281,10 @@ function toModelConfig(model: DiscoveredModel, reasoningModels: Set<string>, con
 			sendSessionAffinityHeaders: true,
 			sendSessionIdHeader: true,
 		},
+		// Pi only exposes extended levels such as xhigh when the model opts in
+		// with a non-null thinkingLevelMap entry. Bifrost forwards this value to
+		// the upstream OpenAI-compatible provider.
+		thinkingLevelMap: reasoning ? { xhigh: "xhigh" } : undefined,
 		_api: prefersResponsesApi(model.id) ? "openai-responses" : "openai-completions",
 	};
 }

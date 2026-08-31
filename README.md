@@ -116,6 +116,17 @@ For OpenAI-family models (`gpt*`, `codex`, `o1/o3/o4`, `openai/*`), this extensi
 - Adds a stable fallback `prompt_cache_key` (`pi-bifrost-<model>`) when pi doesn't provide one.
 - Enables provider/model compat hints for long retention and session-affinity headers.
 
+## Reasoning levels
+
+Models identified as reasoning-capable, or listed in `reasoning_models`, support pi's standard thinking levels. Set the level with `--thinking`, use the `:level` model shorthand, or cycle levels interactively with **Shift+Tab**:
+
+```bash
+pi --model bifrost/openai/gpt-5 --thinking xhigh
+pi --model bifrost/openai/gpt-5:xhigh
+```
+
+Supported levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. The extension opts reasoning-capable Bifrost models into `xhigh` and forwards `xhigh` to the upstream gateway. The upstream model must support that value; if it does not, use a lower level.
+
 ## Commands
 
 The extension adds:
