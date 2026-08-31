@@ -6,24 +6,37 @@ Bifrost exposes an OpenAI-compatible API. This package registers a `bifrost` pro
 
 ## Quick start
 
-Run Bifrost locally, then test this extension without installing it:
+Run Bifrost locally, then install the extension directly from GitHub — no clone required:
+
+```bash
+pi install git:github.com/cullenbmacdonald/pi-bifrost-provider
+```
+
+You can also use the HTTPS URL form:
+
+```bash
+pi install https://github.com/cullenbmacdonald/pi-bifrost-provider
+```
+
+Pi records the package in `~/.pi/agent/settings.json`, clones it into pi's package cache, and loads the extension automatically on startup. After installing, use `/model` and search for `bifrost`, or run:
+
+```bash
+pi --model bifrost/openai/gpt-4o-mini
+```
+
+To try it for a single run without adding it to settings:
+
+```bash
+pi -e git:github.com/cullenbmacdonald/pi-bifrost-provider --list-models bifrost
+pi -e git:github.com/cullenbmacdonald/pi-bifrost-provider --model bifrost/openai/gpt-4o-mini -p "Say hello from Bifrost"
+```
+
+If you're developing this package locally, you can still run it from a checkout:
 
 ```bash
 cd ~/dev/pi-dev/pi-bifrost-provider
 pi -e . --list-models bifrost
-pi -e . --model bifrost/openai/gpt-4o-mini -p "Say hello from Bifrost"
-```
-
-Install locally into pi:
-
-```bash
 pi install ~/dev/pi-dev/pi-bifrost-provider
-```
-
-Then use `/model` and search for `bifrost`, or run:
-
-```bash
-pi --model bifrost/openai/gpt-4o-mini
 ```
 
 ## Configuration
