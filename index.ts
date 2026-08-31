@@ -3,6 +3,13 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
+type PiCompat = {
+	supportsDeveloperRole?: boolean;
+	supportsLongCacheRetention?: boolean;
+	sendSessionAffinityHeaders?: boolean;
+	sendSessionIdHeader?: boolean;
+};
+
 type ProviderModelConfig = {
 	id: string;
 	name: string;
@@ -11,6 +18,7 @@ type ProviderModelConfig = {
 	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 	contextWindow: number;
 	maxTokens: number;
+	compat?: PiCompat;
 	_api?: "openai-responses" | "openai-completions";
 };
 
@@ -263,6 +271,11 @@ function toModelConfig(model: DiscoveredModel, reasoningModels: Set<string>, con
 		cost: model.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow,
 		maxTokens,
+		compat: {
+			supportsLongCacheRetention: true,
+			sendSessionAffinityHeaders: true,
+			sendSessionIdHeader: true,
+		},
 		_api: prefersResponsesApi(model.id) ? "openai-responses" : "openai-completions",
 	};
 }
@@ -332,7 +345,35 @@ function stripInternalFields(models: ProviderModelConfig[]): Array<Omit<Provider
 	return models.map(({ _api: _, ...rest }) => rest);
 }
 
+function isOpenAiCacheCandidate(modelId: unknown): modelId is string {
+	if (typeof modelId !== "string") return false;
+	return /(gpt|codex|o[134]|openai)/i.test(modelId);
+}
+
+function installOpenAiPromptCacheHook(pi: ExtensionAPI) {
+	pi.on("before_provider_request", async (event) => {
+		const payload = (event.payload ?? {}) as Record<string, unknown>;
+		if (!isOpenAiCacheCandidate(payload.model)) return payload;
+
+		// Keep retention explicit for OpenAI prompt caching through gateways.
+		if (payload.prompt_cache_retention !== "24h") {
+			payload.prompt_cache_retention = "24h";
+		}
+
+		// Stable fallback key when pi doesn't provide one.
+		if (typeof payload.prompt_cache_key !== "string" || payload.prompt_cache_key.length === 0) {
+			payload.prompt_cache_key = `pi-bifrost-${payload.model}`;
+		}
+
+		return payload;
+	});
+}
+
 export default async function bifrostProvider(pi: ExtensionAPI) {
+	if (!process.env.PI_CACHE_RETENTION) {
+		process.env.PI_CACHE_RETENTION = "long";
+	}
+
 	const config = await loadConfig();
 	const discoveredModels = await loadModels(config);
 	const reasoningModels = configuredReasoningModels(config);
@@ -356,6 +397,9 @@ export default async function bifrostProvider(pi: ExtensionAPI) {
 			headers: configuredHeaders(config),
 			compat: {
 				supportsDeveloperRole: false,
+				supportsLongCacheRetention: true,
+				sendSessionAffinityHeaders: true,
+				sendSessionIdHeader: true,
 			},
 			models: stripInternalFields(completionsModels),
 		});
@@ -368,9 +412,16 @@ export default async function bifrostProvider(pi: ExtensionAPI) {
 			apiKey: config.apiKey,
 			api: "openai-responses",
 			headers: configuredHeaders(config),
+			compat: {
+				supportsLongCacheRetention: true,
+				sendSessionAffinityHeaders: true,
+				sendSessionIdHeader: true,
+			},
 			models: stripInternalFields(responsesModels),
 		});
 	}
+
+	installOpenAiPromptCacheHook(pi);
 
 	pi.registerCommand("bifrost", {
 		description: "Show Bifrost provider configuration",

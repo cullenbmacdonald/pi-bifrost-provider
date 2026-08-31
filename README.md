@@ -51,6 +51,8 @@ Example:
 
 Environment variables are still supported as overrides, matching the LiteLLM extension style.
 
+Caching defaults also mirror LiteLLM behavior: when `PI_CACHE_RETENTION` is unset, the extension sets it to `long` so pi emits long-lived cache markers for compatible models.
+
 | auth.json key | env override | Default | Description |
 | --- | --- | --- | --- |
 | `key` | `BIFROST_API_KEY` | `dummy-key` | Bearer token sent to Bifrost. Use `dummy-key` when Bifrost handles upstream provider credentials internally. |
@@ -92,6 +94,14 @@ http://localhost:8080/openai/v1
 ```
 
 If you provide `BIFROST_BASE_URL=http://localhost:8080/openai` or `base_url: "http://localhost:8080/openai"`, the extension automatically appends `/v1`.
+
+## Prompt caching behavior
+
+For OpenAI-family models (`gpt*`, `codex`, `o1/o3/o4`, `openai/*`), this extension applies the same guardrails we use in our LiteLLM extension:
+
+- Forces `prompt_cache_retention: "24h"` when missing.
+- Adds a stable fallback `prompt_cache_key` (`pi-bifrost-<model>`) when pi doesn't provide one.
+- Enables provider/model compat hints for long retention and session-affinity headers.
 
 ## Commands
 
